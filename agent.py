@@ -1,4 +1,4 @@
-"""IT Helpdesk Agent - milestone 2: the core agent loop.
+"""IT Helpdesk Agent - milestone 3: working real tickets in ServiceNow.
 
 How an agent works, in one paragraph:
 We send Claude the conversation plus a list of tools it may use. Claude either
@@ -13,6 +13,8 @@ import os
 from anthropic import Anthropic
 from dotenv import load_dotenv
 
+import servicenow
+
 load_dotenv()  # reads ANTHROPIC_API_KEY from the .env file
 
 MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5-5")
@@ -21,75 +23,104 @@ MAX_STEPS = 10  # safety limit so the agent can never loop forever
 client = Anthropic()
 
 SYSTEM_PROMPT = """You are an IT helpdesk agent for a mid-sized company.
-You help employees and IT staff with support tickets.
+You help IT staff triage and work support tickets in ServiceNow.
 
 Rules:
-- Always look up a ticket with the lookup_ticket tool before discussing it.
-  Never guess what a ticket says.
+- Always look a ticket up with a tool before discussing it. Never guess what a
+  ticket says, and never invent ticket numbers.
 - Be concise and practical. Say what the issue is and what the next step is.
-- If a ticket does not exist, say so plainly."""
+- Before you change a ticket (add a note, change state, urgency or impact),
+  say what you are about to change. After the change, confirm what was done.
+- Only change what you were asked to change.
+- If a tool returns an error, tell the user plainly what went wrong."""
 
 
 # ---------------------------------------------------------------------------
 # Tools
-# For now the "ticket system" is a small dictionary. In milestone 3 this is
-# replaced with real calls to ServiceNow, and the rest of the file stays the same.
+# This list is what Claude sees. The descriptions matter: they are how the
+# model decides which tool to use and when. The real work is in servicenow.py.
 # ---------------------------------------------------------------------------
 
-PRACTICE_TICKETS = {
-    "INC001": {
-        "requester": "Dana Whitfield",
-        "summary": "Locked out of my account after too many password attempts",
-        "priority": "high",
-        "status": "open",
-    },
-    "INC002": {
-        "requester": "Marcus Oyelaran",
-        "summary": "Need access to the Finance shared drive for month-end close",
-        "priority": "medium",
-        "status": "open",
-    },
-    "INC003": {
-        "requester": "Priya Raman",
-        "summary": "Laptop fan is very loud and the machine shuts down in meetings",
-        "priority": "medium",
-        "status": "open",
-    },
-}
+LEVELS = ["high", "medium", "low"]
 
-
-def lookup_ticket(ticket_id: str) -> dict:
-    """Return one ticket, or an error the model can read and react to."""
-    ticket = PRACTICE_TICKETS.get(ticket_id.strip().upper())
-    if ticket is None:
-        return {"error": f"No ticket found with id {ticket_id}"}
-    return ticket
-
-
-# This is what Claude sees. The description matters: it is how the model
-# decides when to use the tool.
 TOOLS = [
     {
         "name": "lookup_ticket",
         "description": (
-            "Look up a helpdesk ticket by its id (for example INC001). "
-            "Returns the requester, summary, priority and status."
+            "Get the full details of one ServiceNow incident by its number "
+            "(for example INC0010001), including description, priority, state, "
+            "who reported it, who it is assigned to, and its notes history."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "ticket_id": {
+                "ticket_number": {
                     "type": "string",
-                    "description": "The ticket id, such as INC001",
+                    "description": "The incident number, such as INC0010001",
                 }
             },
-            "required": ["ticket_id"],
+            "required": ["ticket_number"],
         },
-    }
+    },
+    {
+        "name": "list_open_tickets",
+        "description": (
+            "List open ServiceNow incidents, highest priority first. Use this "
+            "to see the queue or to decide what to work on next."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "How many tickets to return (1-25, default 10)",
+                }
+            },
+        },
+    },
+    {
+        "name": "add_work_note",
+        "description": (
+            "Add an internal work note to an incident. Work notes are seen by "
+            "IT staff only, not by the person who reported the issue. Use this "
+            "to record triage findings or next steps."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticket_number": {"type": "string"},
+                "note": {"type": "string", "description": "The note text"},
+            },
+            "required": ["ticket_number", "note"],
+        },
+    },
+    {
+        "name": "update_ticket",
+        "description": (
+            "Change an incident's state, urgency or impact. Priority is "
+            "recalculated by ServiceNow from urgency and impact. This tool "
+            "cannot resolve or close tickets."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticket_number": {"type": "string"},
+                "state": {"type": "string", "enum": ["new", "in_progress"]},
+                "urgency": {"type": "string", "enum": LEVELS},
+                "impact": {"type": "string", "enum": LEVELS},
+            },
+            "required": ["ticket_number"],
+        },
+    },
 ]
 
 # Maps a tool name to the Python function that carries it out.
-TOOL_FUNCTIONS = {"lookup_ticket": lookup_ticket}
+TOOL_FUNCTIONS = {
+    "lookup_ticket": servicenow.lookup_ticket,
+    "list_open_tickets": servicenow.list_open_tickets,
+    "add_work_note": servicenow.add_work_note,
+    "update_ticket": servicenow.update_ticket,
+}
 
 
 def run_tool(name: str, tool_input: dict) -> str:
@@ -143,7 +174,7 @@ def run_agent(messages: list) -> str:
 
 
 def main() -> None:
-    print("IT Helpdesk Agent. Try: 'What is ticket INC001 about?'  (type 'quit' to exit)\n")
+    print("IT Helpdesk Agent. Try: 'Show me the open tickets'  (type 'quit' to exit)\n")
     messages = []
     while True:
         user_input = input("You: ").strip()
