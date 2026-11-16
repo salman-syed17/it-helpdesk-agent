@@ -1,10 +1,17 @@
-"""IT Helpdesk Agent - milestone 3: working real tickets in ServiceNow.
+"""IT Helpdesk Agent - milestone 4: resolving tickets with human approval.
 
 How an agent works, in one paragraph:
 We send Claude the conversation plus a list of tools it may use. Claude either
 answers in plain text, or replies "please run this tool with these inputs".
 When it asks for a tool, OUR code runs it and sends the result back. We repeat
 until Claude gives a final answer. That repeat is the "agent loop".
+
+Files:
+  agent.py       this file: the instructions, the loop, and the terminal chat
+  tools.py       what the agent can do, and which actions need approval
+  servicenow.py  the ServiceNow ticket system
+  identity.py    account unlocks and password resets (simulated)
+  audit.py       a record of every action taken
 """
 
 import json
@@ -13,137 +20,79 @@ import os
 from anthropic import Anthropic
 from dotenv import load_dotenv
 
-import servicenow
+import audit
+from tools import NEEDS_APPROVAL, TOOLS, run_tool
 
-load_dotenv()  # reads ANTHROPIC_API_KEY from the .env file
+load_dotenv()  # reads the settings in the .env file
 
 MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5-5")
-MAX_STEPS = 10  # safety limit so the agent can never loop forever
+MAX_STEPS = 15  # safety limit so the agent can never loop forever
 
 client = Anthropic()
 
 SYSTEM_PROMPT = """You are an IT helpdesk agent for a mid-sized company.
 You help IT staff triage and work support tickets in ServiceNow.
 
-Rules:
-- Always look a ticket up with a tool before discussing it. Never guess what a
-  ticket says, and never invent ticket numbers.
-- Be concise and practical. Say what the issue is and what the next step is.
-- Before you change a ticket (add a note, change state, urgency or impact),
-  say what you are about to change. After the change, confirm what was done.
+General rules:
+- Always look a ticket up with a tool before discussing or acting on it. Never
+  guess what a ticket says, and never invent ticket numbers.
+- Be concise and practical. Say what the issue is and what you did or will do.
 - Only change what you were asked to change.
-- If a tool returns an error, tell the user plainly what went wrong."""
+- If a tool returns an error, tell the user plainly what went wrong.
+
+What you may fix yourself (routine requests):
+- Account lockouts: unlock the account, then resolve the ticket.
+- Forgotten or expired passwords: send a password reset link, then resolve.
+Record what you did in the resolution notes.
+
+What you must hand to a human team with escalate_ticket:
+- Hardware faults (laptops, monitors, printers, phones): Hardware
+- Network, VPN, Wi-Fi or email delivery problems: Network
+- Software installs, licences, application errors: Software
+- Database problems: Database
+- Access requests (shared drives, applications, permissions): Service Desk.
+  These need a manager's sign-off, which you cannot give.
+- Anything security-related (phishing, malware, suspicious sign-ins, lost or
+  stolen devices, possible data exposure): set urgency to high, then escalate
+  to Service Desk and begin the summary with "SECURITY:". Never try to fix
+  these yourself, and never unlock an account or reset a password on a ticket
+  that mentions suspicious activity.
+- Anything unclear or that does not fit the above: Service Desk, saying what
+  information is missing.
+
+Approval:
+- Unlocking an account, sending a password reset and resolving a ticket each
+  need a human's approval. The system asks for it automatically when you call
+  the tool, so call the tool directly instead of asking permission in chat.
+- If an action is denied, do not retry it. Add a work note saying it was
+  declined, then tell the user what you did and did not do.
+- Never resolve a ticket unless the fix was actually carried out."""
 
 
-# ---------------------------------------------------------------------------
-# Tools
-# This list is what Claude sees. The descriptions matter: they are how the
-# model decides which tool to use and when. The real work is in servicenow.py.
-# ---------------------------------------------------------------------------
-
-LEVELS = ["high", "medium", "low"]
-
-TOOLS = [
-    {
-        "name": "lookup_ticket",
-        "description": (
-            "Get the full details of one ServiceNow incident by its number "
-            "(for example INC0010001), including description, priority, state, "
-            "who reported it, who it is assigned to, and its notes history."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "ticket_number": {
-                    "type": "string",
-                    "description": "The incident number, such as INC0010001",
-                }
-            },
-            "required": ["ticket_number"],
-        },
-    },
-    {
-        "name": "list_open_tickets",
-        "description": (
-            "List open ServiceNow incidents, highest priority first. Use this "
-            "to see the queue or to decide what to work on next."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "limit": {
-                    "type": "integer",
-                    "description": "How many tickets to return (1-25, default 10)",
-                }
-            },
-        },
-    },
-    {
-        "name": "add_work_note",
-        "description": (
-            "Add an internal work note to an incident. Work notes are seen by "
-            "IT staff only, not by the person who reported the issue. Use this "
-            "to record triage findings or next steps."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "ticket_number": {"type": "string"},
-                "note": {"type": "string", "description": "The note text"},
-            },
-            "required": ["ticket_number", "note"],
-        },
-    },
-    {
-        "name": "update_ticket",
-        "description": (
-            "Change an incident's state, urgency or impact. Priority is "
-            "recalculated by ServiceNow from urgency and impact. This tool "
-            "cannot resolve or close tickets."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "ticket_number": {"type": "string"},
-                "state": {"type": "string", "enum": ["new", "in_progress"]},
-                "urgency": {"type": "string", "enum": LEVELS},
-                "impact": {"type": "string", "enum": LEVELS},
-            },
-            "required": ["ticket_number"],
-        },
-    },
-]
-
-# Maps a tool name to the Python function that carries it out.
-TOOL_FUNCTIONS = {
-    "lookup_ticket": servicenow.lookup_ticket,
-    "list_open_tickets": servicenow.list_open_tickets,
-    "add_work_note": servicenow.add_work_note,
-    "update_ticket": servicenow.update_ticket,
-}
+def ask_in_terminal(tool_name: str, tool_input: dict) -> tuple[bool, str]:
+    """Ask the person at the keyboard to approve one action.
+    Returns (approved, reason). Other interfaces (a web page, an automated
+    test) can supply their own version of this function."""
+    print("\n  +-- APPROVAL NEEDED " + "-" * 40)
+    print(f"  | The agent wants to: {tool_name}")
+    for key, value in tool_input.items():
+        print(f"  |   {key}: {value}")
+    print("  +" + "-" * 59)
+    answer = input("  Approve? (y/n): ").strip().lower()
+    if answer in {"y", "yes"}:
+        return True, ""
+    reason = input("  Reason for declining (optional): ").strip()
+    return False, reason
 
 
-def run_tool(name: str, tool_input: dict) -> str:
-    """Run the tool Claude asked for and return the result as text."""
-    function = TOOL_FUNCTIONS.get(name)
-    if function is None:
-        return json.dumps({"error": f"Unknown tool: {name}"})
-    try:
-        return json.dumps(function(**tool_input))
-    except Exception as error:  # report the failure to the model, don't crash
-        return json.dumps({"error": str(error)})
+def run_agent(messages: list, approve=ask_in_terminal) -> str:
+    """Call Claude repeatedly until it gives a final answer. Returns that answer.
 
-
-# ---------------------------------------------------------------------------
-# The agent loop
-# ---------------------------------------------------------------------------
-
-def run_agent(messages: list) -> str:
-    """Call Claude repeatedly until it gives a final answer. Returns that answer."""
+    `approve` is the function used to get human sign-off for risky actions."""
     for _ in range(MAX_STEPS):
         response = client.messages.create(
             model=MODEL,
-            max_tokens=1024,
+            max_tokens=2048,
             system=SYSTEM_PROMPT,
             tools=TOOLS,
             messages=messages,
@@ -156,18 +105,30 @@ def run_agent(messages: list) -> str:
         if response.stop_reason != "tool_use":
             return "".join(b.text for b in response.content if b.type == "text")
 
-        # Otherwise run every tool Claude asked for and send the results back.
+        # Otherwise handle every tool Claude asked for and send the results back.
         tool_results = []
         for block in response.content:
-            if block.type == "tool_use":
-                print(f"  [tool] {block.name}({json.dumps(block.input)})")
-                tool_results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": run_tool(block.name, block.input),
-                    }
+            if block.type != "tool_use":
+                continue
+            print(f"  [tool] {block.name}({json.dumps(block.input)})")
+
+            approval = "not_required"
+            if block.name in NEEDS_APPROVAL:
+                approved, reason = approve(block.name, block.input)
+                approval = "approved" if approved else "denied"
+
+            if approval == "denied":
+                # The tool does NOT run. Claude is told why and must adapt.
+                result = json.dumps(
+                    {"denied": True, "reason": reason or "A human declined this action."}
                 )
+            else:
+                result = run_tool(block.name, block.input)
+
+            audit.record(block.name, block.input, approval, result)
+            tool_results.append(
+                {"type": "tool_result", "tool_use_id": block.id, "content": result}
+            )
         messages.append({"role": "user", "content": tool_results})
 
     return "I stopped because I reached my step limit. Please try rephrasing."

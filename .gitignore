@@ -8,3 +8,6 @@ __pycache__/
 
 # Editor
 .vscode/
+
+# Audit log of agent actions (may contain ticket details)
+logs/

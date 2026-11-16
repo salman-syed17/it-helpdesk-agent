@@ -53,9 +53,6 @@ def _request(method: str, path: str, params: dict = None, body: dict = None) -> 
 
     if response.status_code == 401:
         return {"error": "ServiceNow rejected the username or password."}
-    if response.status_code == 403:
-        return {"error": "This ServiceNow user is not allowed to do that."}
-
     try:
         data = response.json()
     except ValueError:
@@ -66,8 +63,14 @@ def _request(method: str, path: str, params: dict = None, body: dict = None) -> 
         }
 
     if response.status_code >= 400:
-        message = data.get("error", {}).get("message", f"HTTP {response.status_code}")
-        return {"error": f"ServiceNow error: {message}"}
+        # Pass ServiceNow's own explanation through. A 403 can mean "no
+        # permission", but also "a required field is missing" or "a rule
+        # blocked this change", and only the detail says which.
+        error = data.get("error", {}) if isinstance(data, dict) else {}
+        message = error.get("message", "") if isinstance(error, dict) else str(error)
+        detail = error.get("detail", "") if isinstance(error, dict) else ""
+        text = " - ".join(part for part in (message, detail) if part)
+        return {"error": f"ServiceNow refused (HTTP {response.status_code}): {text or 'no reason given'}"}
     return data
 
 
@@ -93,7 +96,7 @@ def _find_ticket(ticket_number: str, fields: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# The four actions the agent can take
+# The actions the agent can take in ServiceNow
 # ---------------------------------------------------------------------------
 
 def lookup_ticket(ticket_number: str) -> dict:
@@ -168,6 +171,95 @@ def update_ticket(
     )
     if "error" in data:
         return data
+    return {"ok": True, "ticket": data["result"]}
+
+
+# Teams a ticket can be handed to. These groups exist in a standard ServiceNow
+# developer instance.
+ESCALATION_TEAMS = ["Service Desk", "Hardware", "Network", "Software", "Database"]
+
+
+def escalate_ticket(ticket_number: str, team: str, summary: str) -> dict:
+    """Hand a ticket to a human team, with a note explaining why."""
+    if team not in ESCALATION_TEAMS:
+        return {"error": f"team must be one of {ESCALATION_TEAMS}"}
+    ticket = _find_ticket(ticket_number, "sys_id,number")
+    if "error" in ticket:
+        return ticket
+    data = _request(
+        "PATCH",
+        f"incident/{ticket['sys_id']}",
+        params={
+            "sysparm_fields": "number,assignment_group",
+            "sysparm_display_value": "true",
+            "sysparm_exclude_reference_link": "true",
+            # lets us set the team by its name instead of its internal id
+            "sysparm_input_display_value": "true",
+        },
+        body={
+            "assignment_group": team,
+            "work_notes": f"[IT Helpdesk Agent] Escalated to {team}. {summary}",
+        },
+    )
+    if "error" in data:
+        return data
+    assigned = data["result"].get("assignment_group")
+    if not assigned:
+        return {"error": f"ServiceNow has no group named '{team}', so the ticket was not assigned."}
+    return {"ok": True, "ticket": ticket["number"], "assigned_to_team": assigned}
+
+
+# The "resolution code" ServiceNow requires on a resolved ticket. The allowed
+# values differ between ServiceNow releases, and an unrecognised value is
+# silently dropped, so we try these in order and remember the one that works.
+# \u2013 is a long dash, which newer releases use in these names.
+RESOLUTION_CODES = [
+    "Resolved \u2013 Permanent Fix Applied",  # 2026 releases
+    "Resolved - Permanent Fix Applied",
+    "Solution provided",  # 2024-2025 releases
+    "Solved (Permanently)",  # older releases
+]
+_working_code = None  # filled in after the first successful resolve
+
+
+def resolve_ticket(ticket_number: str, resolution_notes: str) -> dict:
+    """Mark a ticket as resolved, recording what was done to fix it."""
+    global _working_code
+    if not resolution_notes.strip():
+        return {"error": "resolution_notes are required to resolve a ticket."}
+    ticket = _find_ticket(ticket_number, "sys_id,number")
+    if "error" in ticket:
+        return ticket
+
+    codes = [_working_code] if _working_code else RESOLUTION_CODES
+    data = {"error": "No resolution code to try."}
+    for code in codes:
+        data = _request(
+            "PATCH",
+            f"incident/{ticket['sys_id']}",
+            params={
+                "sysparm_fields": "number,state,close_code,close_notes",
+                "sysparm_display_value": "true",
+            },
+            body={
+                "state": "6",  # 6 = Resolved
+                "close_code": code,
+                "close_notes": f"[IT Helpdesk Agent] {resolution_notes}",
+            },
+        )
+        # ServiceNow dropped this code as invalid: try the next one.
+        if "error" in data and "Resolution code" in data["error"]:
+            continue
+        break
+
+    if "error" in data:
+        return data
+    if "resolved" not in str(data["result"].get("state", "")).lower():
+        return {
+            "error": "ServiceNow accepted the request but the ticket is not "
+            f"resolved (state is '{data['result'].get('state')}')."
+        }
+    _working_code = code
     return {"ok": True, "ticket": data["result"]}
 
 
