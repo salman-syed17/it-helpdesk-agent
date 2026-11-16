@@ -1,4 +1,4 @@
-"""IT Helpdesk Agent - milestone 4: resolving tickets with human approval.
+"""IT Helpdesk Agent: triages and resolves ServiceNow tickets with human approval.
 
 How an agent works, in one paragraph:
 We send Claude the conversation plus a list of tools it may use. Claude either
@@ -12,6 +12,7 @@ Files:
   servicenow.py  the ServiceNow ticket system
   identity.py    account unlocks and password resets (simulated)
   audit.py       a record of every action taken
+  run_evals.py   measures how often the agent gets tickets right
 """
 
 import json
@@ -85,10 +86,23 @@ def ask_in_terminal(tool_name: str, tool_input: dict) -> tuple[bool, str]:
     return False, reason
 
 
-def run_agent(messages: list, approve=ask_in_terminal) -> str:
+def run_agent(
+    messages: list,
+    approve=ask_in_terminal,
+    execute=run_tool,
+    record=audit.record,
+    verbose=True,
+) -> str:
     """Call Claude repeatedly until it gives a final answer. Returns that answer.
 
-    `approve` is the function used to get human sign-off for risky actions."""
+    The defaults are the real thing: a person approving in the terminal, real
+    tools, and the real audit log. The evaluation script (run_evals.py) passes
+    in stand-ins so it can test the same loop and prompt without touching
+    ServiceNow.
+      approve  how to get human sign-off for risky actions
+      execute  how to run a tool
+      record   where to log each action
+      verbose  whether to print each tool call"""
     for _ in range(MAX_STEPS):
         response = client.messages.create(
             model=MODEL,
@@ -110,7 +124,8 @@ def run_agent(messages: list, approve=ask_in_terminal) -> str:
         for block in response.content:
             if block.type != "tool_use":
                 continue
-            print(f"  [tool] {block.name}({json.dumps(block.input)})")
+            if verbose:
+                print(f"  [tool] {block.name}({json.dumps(block.input)})")
 
             approval = "not_required"
             if block.name in NEEDS_APPROVAL:
@@ -123,9 +138,9 @@ def run_agent(messages: list, approve=ask_in_terminal) -> str:
                     {"denied": True, "reason": reason or "A human declined this action."}
                 )
             else:
-                result = run_tool(block.name, block.input)
+                result = execute(block.name, block.input)
 
-            audit.record(block.name, block.input, approval, result)
+            record(block.name, block.input, approval, result)
             tool_results.append(
                 {"type": "tool_result", "tool_use_id": block.id, "content": result}
             )
