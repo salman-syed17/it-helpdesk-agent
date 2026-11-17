@@ -121,6 +121,8 @@ streamlit run app.py           (web interface)
 | `servicenow.py` | ServiceNow Table API calls |
 | `identity.py` | Account unlock and password reset |
 | `audit.py` | Audit log |
+| `create_test_tickets.py` | Adds practice incidents to your ServiceNow instance |
+| `requirements.txt`, `.env.example` | Python packages, and a template for your settings |
 | `run_evals.py`, `evals/` | Evaluation script, test cases and latest results |
 
 ## Known limitations
