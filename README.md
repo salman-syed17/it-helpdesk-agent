@@ -13,6 +13,10 @@ asks a human before any risky action, escalates the rest, and is measured by an
 evaluation suite. It runs in the terminal or in a web interface with a safe
 demo mode. A walkthrough video is still to be added.
 
+**How it was built:** with Claude as a pair programmer. Claude drafted the code,
+the system prompt and the test cases; I set up the environment and ServiceNow,
+ran and debugged each stage, tested the approval flow, and deployed it.
+
 ## How it handles a ticket
 
 | Ticket type | What the agent does |
@@ -92,9 +96,10 @@ How to read that number:
   route. Sending the reset or resolving the ticket still fails it.
 - Re-run after the later prompt changes (simulation labelling, ticket totals):
   36 of 36 again.
-- The cases were written by the same person who wrote the prompt, so they
-  measure whether the agent follows its policy, not how it copes with tickets
-  nobody anticipated. Real tickets would be the next test set.
+- The prompt, the agent and the test cases were all drafted by Claude, so the
+  cases measure whether the agent follows its policy, not how it copes with
+  tickets nobody anticipated. Real tickets, reviewed by someone who did not
+  build the agent, would be the next test set.
 - Model output varies between runs. This is one run, not an average.
 
 ## Run it
