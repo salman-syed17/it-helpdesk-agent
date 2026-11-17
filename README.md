@@ -4,10 +4,14 @@ An AI agent that triages and resolves IT helpdesk tickets. It reads a ticket,
 decides what to do, calls tools to act on it, and escalates to a human when a
 request is risky or unclear.
 
+**[Try the live demo](https://it-desk-agent.streamlit.app/)** - runs on practice
+tickets, so nothing real can be changed. If the page says the app is asleep,
+click the button to wake it; it takes under a minute.
+
 **Status:** The agent resolves routine tickets in a real ServiceNow instance,
 asks a human before any risky action, escalates the rest, and is measured by an
 evaluation suite. It runs in the terminal or in a web interface with a safe
-demo mode. A hosted demo link and walkthrough video are still to be added.
+demo mode. A walkthrough video is still to be added.
 
 ## How it handles a ticket
 
@@ -142,4 +146,5 @@ streamlit run app.py           (web interface)
 - [x] 4. Resolve routine requests, with human approval for risky actions
 - [x] 5. Evaluation set and scoring script
 - [x] 6a. Web interface with a safe demo mode
-- [ ] 6b. Hosted demo link and walkthrough video
+- [x] 6b. Hosted demo on Streamlit Community Cloud
+- [ ] 6c. Walkthrough video
