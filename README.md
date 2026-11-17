@@ -4,9 +4,10 @@ An AI agent that triages and resolves IT helpdesk tickets. It reads a ticket,
 decides what to do, calls tools to act on it, and escalates to a human when a
 request is risky or unclear.
 
-**Status:** Milestone 5 of 6 - the agent resolves routine tickets in a real
-ServiceNow instance, asks a human before any risky action, escalates the rest,
-and is measured by an evaluation suite.
+**Status:** The agent resolves routine tickets in a real ServiceNow instance,
+asks a human before any risky action, escalates the rest, and is measured by an
+evaluation suite. It runs in the terminal or in a web interface with a safe
+demo mode. A hosted demo link and walkthrough video are still to be added.
 
 ## How it handles a ticket
 
@@ -28,6 +29,26 @@ and is measured by an evaluation suite.
   account with only the `itil` role, not as an administrator.
 - **Audit log.** Every tool call is written to `logs/audit.jsonl` with its
   inputs, result and approval decision.
+- **Honest about simulations.** Actions that are simulated (see Known
+  limitations) are marked as such in the tool result, and the agent is told to
+  say so in its replies and resolution notes instead of claiming they happened.
+
+## Web interface
+
+```
+streamlit run app.py
+```
+
+Risky actions appear as cards with Approve and Decline buttons, and the agent
+pauses until a person clicks. Every action it takes is listed on the page.
+
+| Mode | When | What the agent works on |
+|---|---|---|
+| Live | ServiceNow settings are in `.env` | Real incidents in your ServiceNow instance |
+| Demo | No ServiceNow settings, or `DEMO_MODE=1` | Six practice tickets held in memory; nothing real can change |
+
+The agent, prompt, tools and approval rule are identical in both modes. Demo
+mode limits each visitor to 20 messages to cap API spend.
 
 ## Evaluation
 
@@ -65,6 +86,8 @@ How to read that number:
   incident; the test only accepted routing to Hardware. The agent's behaviour
   was sound and the expectation was too narrow, so the case now accepts either
   route. Sending the reset or resolving the ticket still fails it.
+- Re-run after the later prompt changes (simulation labelling, ticket totals):
+  36 of 36 again.
 - The cases were written by the same person who wrote the prompt, so they
   measure whether the agent follows its policy, not how it copes with tickets
   nobody anticipated. Real tickets would be the next test set.
@@ -79,14 +102,17 @@ pip install -r requirements.txt
 copy .env.example .env         (then fill in your Anthropic key and ServiceNow details)
 python servicenow.py           (tests the ServiceNow connection)
 python create_test_tickets.py  (optional: adds practice tickets)
-python agent.py
+python agent.py                (terminal)
+streamlit run app.py           (web interface)
 ```
 
 ## Project layout
 
 | File | Purpose |
 |---|---|
-| `agent.py` | Instructions, the agent loop, the approval prompt, terminal chat |
+| `agent.py` | Instructions, the agent loop (can pause for approval), terminal chat |
+| `app.py` | Streamlit web interface, live and demo modes |
+| `fake_helpdesk.py` | In-memory tickets used by demo mode and the evals |
 | `tools.py` | Tool definitions and the list of actions that need approval |
 | `servicenow.py` | ServiceNow Table API calls |
 | `identity.py` | Account unlock and password reset |
@@ -99,7 +125,14 @@ python agent.py
   without touching a real account. In production it would call an identity
   provider such as Okta or Microsoft Entra ID; the functions are isolated in
   one file so that swap changes nothing else.
-- Runs in a terminal for one user at a time.
+- **The audit log records each approval decision but not who made it.** The
+  web interface has no login. A production version would add the approver's
+  identity to every entry.
+- **Escalating, adding notes and changing urgency need no approval.** They are
+  low-risk and easy to reverse; unlocking, resetting and resolving are not.
+- The ticket list shows at most 25 tickets at a time, though it reports the
+  total number of open tickets.
+- One user at a time per session; no authentication.
 
 ## Roadmap
 
@@ -108,4 +141,5 @@ python agent.py
 - [x] 3. Read and update real tickets in ServiceNow
 - [x] 4. Resolve routine requests, with human approval for risky actions
 - [x] 5. Evaluation set and scoring script
-- [ ] 6. Web interface, deployment, demo video
+- [x] 6a. Web interface with a safe demo mode
+- [ ] 6b. Hosted demo link and walkthrough video

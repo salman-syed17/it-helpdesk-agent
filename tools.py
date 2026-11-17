@@ -39,7 +39,9 @@ TOOLS = [
         "name": "list_open_tickets",
         "description": (
             "List open ServiceNow incidents, highest priority first. Use this "
-            "to see the queue or to decide what to work on next."
+            "to see the queue or to decide what to work on next. The result "
+            "includes total_open, the number of open tickets in all; if that is "
+            "larger than count, you are only seeing the top of the queue."
         ),
         "input_schema": {
             "type": "object",

@@ -22,39 +22,33 @@ from datetime import date
 from pathlib import Path
 
 import agent
-from servicenow import ESCALATION_TEAMS
+from fake_helpdesk import FakeHelpdesk
 
 EVALS_DIR = Path(__file__).parent / "evals"
 TICKET = "INC9000001"
-LEVEL_LABELS = {"high": "1 - High", "medium": "2 - Medium", "low": "3 - Low"}
 IDENTITY_TOOLS = ("unlock_account", "send_password_reset")
 
 
-class FakeHelpdesk:
-    """Stands in for ServiceNow and the identity system during one test case.
-    It holds a single ticket and remembers every action the agent takes."""
+class TestDesk:
+    """One test case's helpdesk: a single fake ticket, a stand-in for the
+    human approver, and a record of every action the agent takes."""
 
     def __init__(self, case: dict):
         t = case["ticket"]
-        self.ticket = {
-            "number": TICKET,
-            "short_description": t["short_description"],
-            "description": t["description"],
-            "caller_id": t["caller"],
-            "priority": "4 - Low",
-            "urgency": "3 - Low",
-            "impact": "3 - Low",
-            "state": "New",
-            "assigned_to": "",
-            "assignment_group": "",
-            "work_notes": "",
-        }
+        self.helpdesk = FakeHelpdesk(
+            [
+                {
+                    "number": TICKET,
+                    "short_description": t["short_description"],
+                    "description": t["description"],
+                    "caller_id": t["caller"],
+                }
+            ]
+        )
         self.deny_approvals = case.get("approval") == "deny"
         self.calls = []  # every tool call, in order
 
-    # -- the two hooks the agent loop uses ---------------------------------
-
-    def approve(self, tool_name: str, tool_input: dict) -> tuple[bool, str]:
+    def approve(self, tool_name: str, tool_input: dict, call_id: str = "") -> tuple[bool, str]:
         """Plays the human. Approves everything unless the case says deny."""
         if self.deny_approvals:
             self.calls.append({"tool": tool_name, "input": tool_input, "ok": False, "denied": True})
@@ -63,66 +57,12 @@ class FakeHelpdesk:
 
     def execute(self, tool_name: str, tool_input: dict) -> str:
         """Runs a tool against the fake ticket and records the call."""
-        handler = getattr(self, f"_{tool_name}", None)
-        try:
-            result = handler(**tool_input) if handler else {"error": f"Unknown tool: {tool_name}"}
-        except TypeError as error:
-            result = {"error": str(error)}
-        self.calls.append({"tool": tool_name, "input": tool_input, "ok": "error" not in result})
-        return json.dumps(result)
-
-    # -- fake versions of each tool, returning the same shapes as the real ones
-
-    def _missing(self, ticket_number: str):
-        if str(ticket_number).strip().upper() != TICKET:
-            return {"error": f"No ticket found with number {ticket_number}"}
-        return None
-
-    def _lookup_ticket(self, ticket_number):
-        return self._missing(ticket_number) or self.ticket
-
-    def _list_open_tickets(self, limit=10):
-        return {"count": 1, "tickets": [self.ticket]}
-
-    def _add_work_note(self, ticket_number, note):
-        if error := self._missing(ticket_number):
-            return error
-        self.ticket["work_notes"] += f"{note}\n"
-        return {"ok": True, "ticket": TICKET, "note_added": note}
-
-    def _update_ticket(self, ticket_number, state=None, urgency=None, impact=None):
-        if error := self._missing(ticket_number):
-            return error
-        if urgency:
-            self.ticket["urgency"] = LEVEL_LABELS.get(urgency, urgency)
-        if impact:
-            self.ticket["impact"] = LEVEL_LABELS.get(impact, impact)
-        if state:
-            self.ticket["state"] = "In Progress" if state == "in_progress" else "New"
-        return {"ok": True, "ticket": self.ticket}
-
-    def _escalate_ticket(self, ticket_number, team, summary):
-        if error := self._missing(ticket_number):
-            return error
-        if team not in ESCALATION_TEAMS:
-            return {"error": f"team must be one of {ESCALATION_TEAMS}"}
-        self.ticket["assignment_group"] = team
-        return {"ok": True, "ticket": TICKET, "assigned_to_team": team}
-
-    def _resolve_ticket(self, ticket_number, resolution_notes):
-        if error := self._missing(ticket_number):
-            return error
-        self.ticket["state"] = "Resolved"
-        return {"ok": True, "ticket": {"number": TICKET, "state": "Resolved"}}
-
-    def _unlock_account(self, user_name):
-        return {"ok": True, "action": "account_unlocked", "user": user_name}
-
-    def _send_password_reset(self, user_name):
-        return {"ok": True, "action": "password_reset_link_sent", "user": user_name}
+        result = self.helpdesk.execute(tool_name, tool_input)
+        self.calls.append({"tool": tool_name, "input": tool_input, "ok": '"error"' not in result})
+        return result
 
 
-def score(case: dict, desk: FakeHelpdesk) -> list[str]:
+def score(case: dict, desk: TestDesk) -> list[str]:
     """Compare what the agent did with what it should have done.
     Returns a list of problems; an empty list means the case passed."""
     expected = case["expected"]
@@ -189,7 +129,7 @@ def score(case: dict, desk: FakeHelpdesk) -> list[str]:
 
 def run_case(case: dict) -> dict:
     """Run the agent on one case and score it."""
-    desk = FakeHelpdesk(case)
+    desk = TestDesk(case)
     messages = [{"role": "user", "content": f"Handle ticket {TICKET}."}]
     try:
         agent.run_agent(

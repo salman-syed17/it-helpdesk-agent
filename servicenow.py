@@ -62,6 +62,12 @@ def _request(method: str, path: str, params: dict = None, body: dict = None) -> 
             "sign in at developer.servicenow.com to wake it, then try again."
         }
 
+    # For list queries ServiceNow reports how many records match in total,
+    # even when we only asked for the first few.
+    total = response.headers.get("X-Total-Count")
+    if total and total.isdigit() and isinstance(data, dict):
+        data["total_count"] = int(total)
+
     if response.status_code >= 400:
         # Pass ServiceNow's own explanation through. A 403 can mean "no
         # permission", but also "a required field is missing" or "a rule
@@ -120,7 +126,12 @@ def list_open_tickets(limit: int = 10) -> dict:
     )
     if "error" in data:
         return data
-    return {"count": len(data["result"]), "tickets": data["result"]}
+    listing = {"count": len(data["result"]), "tickets": data["result"]}
+    if "total_count" in data:
+        # Lets the agent say "showing 10 of 43" instead of implying that
+        # the list it was given is the whole queue.
+        listing["total_open"] = data["total_count"]
+    return listing
 
 
 def add_work_note(ticket_number: str, note: str) -> dict:
